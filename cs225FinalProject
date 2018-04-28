@@ -1,0 +1,731 @@
+(* Name: Kristin Mills *)
+
+(* Course: UVM CS 225 Spring 2018 - Darais *)
+(* Final Project: Exceptions *)
+
+open Util
+open StringSetMap
+
+(**************************
+ * Syntax for types*
+ **************************)
+
+(* X ∈ tvar ≈ 𝕊
+ * τ ∈ type ⩴ bool | nat | τ × τ | τ → τ
+ *)
+type tvar = string
+[@@deriving show {with_path = false}]
+
+type ty =
+  | Bool
+  | Nat
+  | Prod of ty * ty
+  | Fun of ty * ty
+[@@deriving show {with_path = false}]
+
+(**************************
+ * Syntax for expressions *
+ **************************)
+
+(* x ∈ var ≈ 𝕊
+ *)
+type var = string
+[@@deriving show {with_path = false}]
+
+(* e ∈ exp ⩴ true | false | if(e)(e)(e)
+ *         | zero | succ(e) | pred(e) | iszero(e)
+ *         | ⟨e,e⟩ | projl(e) | projr(e)
+ *         | x | let x ≔ e in e | λ(x:τ).e | e(e)
+ *         | raise(e) | try(e)with(e)
+ *)
+type exp =
+  | True
+  | False
+  | If of exp * exp * exp
+  | Zero
+  | Succ of exp
+  | Pred of exp
+  | IsZero of exp
+  | Pair of exp * exp
+  | Projl of exp
+  | Projr of exp
+  | Var of var
+  | Let of var * exp * exp
+  | Lambda of var * ty * exp
+  | Apply of exp * exp
+  | Raise of exp
+  | Try of exp * exp
+[@@deriving show {with_path = false}]
+
+(*********************
+ * Syntax for values *
+ *********************)
+
+(* nv ∈ nval ⩴ zero | succ(nv)
+ *)
+type natval =
+  | VZero
+  | VSucc of natval
+[@@deriving show {with_path = false}]
+
+(* v ∈ value ⩴ true | false
+ *           | n
+ *           | ⟨v,v⟩
+ *           | λ(x:τ).e
+ *)
+type value =
+  | VTrue
+  | VFalse
+  | VNat of natval
+  | VPair of value * value
+  | VLambda of var * ty * exp
+[@@deriving show {with_path = false}]
+
+(***********************************
+ * Syntax for type system contexts *
+ ***********************************)
+
+(* Γ ∈ tenv ≔ var ⇀ type
+ *)
+type tscope = string_set
+[@@deriving show {with_path = false}]
+
+(* S ∈ scope ≔ ℘(tvar)
+ *)
+type tenv = ty string_map
+[@@deriving show {with_path = false}]
+
+(****************************
+ * Free variables for types *
+ ****************************)
+
+(* FV ∈ type → ℘(tvar)
+ * tfree_vars τ ≡ FV(τ)
+ *)
+let rec tfree_vars (t0 : ty) : string_set = match t0 with
+  | Bool -> StringSet.empty
+  | Nat -> StringSet.empty
+  | Prod(t1,t2) -> StringSet.union (tfree_vars t1) (tfree_vars t2)
+  | Fun(t1,t2) -> StringSet.union (tfree_vars t1) (tfree_vars t2)
+
+(**********************************
+ * Free variables for expressions *
+ **********************************)
+
+(* FV ∈ exp → ℘(var)
+ * efree_vars e ≡ FV(e)
+ *)
+let rec efree_vars (e0 : exp) : string_set = match e0 with
+  | True -> StringSet.empty
+  | False -> StringSet.empty
+  | If(e1,e2,e3) ->
+      StringSet.union
+        (efree_vars e1)
+        (StringSet.union (efree_vars e2) (efree_vars e3))
+  | Zero -> StringSet.empty
+  | Succ(e) -> efree_vars e
+  | Pred(e) -> efree_vars e
+  | IsZero(e) -> efree_vars e
+  | Pair(e1,e2) -> StringSet.union (efree_vars e1) (efree_vars e2)
+  | Projl(e) -> efree_vars e
+  | Projr(e) -> efree_vars e
+  | Var(x) -> StringSet.of_list [x]
+  | Let(x,e1,e2) ->
+      StringSet.union
+        (efree_vars e1)
+        (StringSet.remove x (efree_vars e2))
+  | Lambda(x,t,e) ->
+      StringSet.remove x (efree_vars e)
+  | Apply(e1,e2) -> StringSet.union (efree_vars e1) (efree_vars e2)
+  | Raise(e) -> efree_vars e
+  | Try(e1,e2) -> StringSet.union (efree_vars e1) (efree_vars e2)
+
+(***********************************************
+ * Substitution for expressions in expressions *
+ ***********************************************)
+
+(* Non-capture-avoiding substitution for expressions in expressions. Because
+ * this is non-capture-avoiding, it assumes that the expression being
+ * substituted is closed.
+ *
+ *   esubst_e_i x e′ e
+ *
+ * Assumption: e′ is closed
+ *
+ * Do not use this function directly. Instead, use esubst_e which checks the
+ * invariant.
+ *)
+let rec esubst_e_i (x : var) (e' : exp) (e0 : exp) : exp = match e0 with
+  | True -> True
+  | False -> False
+  | If(e1,e2,e3) -> If(esubst_e_i x e' e1,esubst_e_i x e' e2,esubst_e_i x e' e3)
+  | Zero -> Zero
+  | Succ(e) -> Succ(esubst_e_i x e' e)
+  | Pred(e) -> Pred(esubst_e_i x e' e)
+  | IsZero(e) -> IsZero(esubst_e_i x e' e)
+  | Pair(e1,e2) -> Pair(esubst_e_i x e' e1,esubst_e_i x e' e2)
+  | Projl(e) -> Projl(esubst_e_i x e' e)
+  | Projr(e) -> Projr(esubst_e_i x e' e)
+  | Var(y) -> if x = y then e' else Var(y)
+  | Let(y,e1,e2) ->
+      if x = y
+      then Let(x,esubst_e_i x e' e1,e2)
+      else Let(y,esubst_e_i x e' e1,esubst_e_i x e' e2)
+  | Lambda(y,t,e) ->
+      if x = y
+      then Lambda(x,t,e)
+      else Lambda(y,t,esubst_e_i x e' e)
+  | Apply(e1,e2) -> Apply(esubst_e_i x e' e1,esubst_e_i x e' e2)
+  | Raise(e) -> Raise((esubst_e_i x e' e))
+  | Try(e1,e2) -> Try(esubst_e_i x e' e1,esubst_e_i x e' e2)
+
+exception NOT_CLOSED_ERROR
+
+(* A version of non-capture-avoiding substitution that raises an exception if
+ * its required assumptions are not satisfied.
+ *
+ * [_↦_]_ ∈ var × exp × exp → exp
+ * esubst_e x e′ e ≡ [x↦e′]e
+ *
+ * Raises exception if e′ is not closed
+ *)
+let esubst_e (x : var) (e' : exp) (e : exp) : exp =
+  if StringSet.equal (efree_vars e') StringSet.empty
+  then esubst_e_i x e' e
+  else raise NOT_CLOSED_ERROR
+
+(*****************************************
+ * Substitution for types in expressions *
+ *****************************************)
+
+(* Non-capture-avoiding substitution for types in expressions. Because this is
+ * non-capture-avoiding, it assumes that the type being substituted is closed.
+ *
+ *   esubst_t_i X τ′ e
+ *
+ * Assumption: τ′ is closed
+ *
+ * Do not use this function directly. Instead, use esubst_t which checks the
+ * invariant.
+ *)
+let rec esubst_t_i (xt : tvar) (t' : ty) (e0 : exp) : exp = match e0 with
+  | True -> True
+  | False -> False
+  | If(e1,e2,e3) -> If(esubst_t_i xt t' e1,esubst_t_i xt t' e2,esubst_t_i xt t' e3)
+  | Zero -> Zero
+  | Succ(e) -> Succ(esubst_t_i xt t' e)
+  | Pred(e) -> Pred(esubst_t_i xt t' e)
+  | IsZero(e) -> IsZero(esubst_t_i xt t' e)
+  | Pair(e1,e2) -> Pair(esubst_t_i xt t' e1,esubst_t_i xt t' e2)
+  | Projl(e) -> Projl(esubst_t_i xt t' e)
+  | Projr(e) -> Projr(esubst_t_i xt t' e)
+  | Var(x) -> Var(x)
+  | Let(x,e1,e2) -> Let(x,esubst_t_i xt t' e1,esubst_t_i xt t' e2)
+  | Lambda(x,t,e) -> Lambda(x,tsubst xt t' t,esubst_t_i xt t' e)
+  | Apply(e1,e2) -> Apply(esubst_t_i xt t' e1,esubst_t_i xt t' e2)
+  | Raise(e) -> Raise(esubst_t_i xt t' e)
+  | Try(e1,e2) -> Try(esubst_t_i xt t' e1,esubst_t_i xt t' e2)
+(* A version of non-capture-avoiding substitution that raises an exception if
+ * its required assumptions are not satisfied.
+ *
+ * [_↦_]_ ∈ tvar × type × exp → exp
+ * esubst_t X τ′ e ≡ [X↦τ′]e
+ *
+ * Raises exception if τ′ is not closed
+ *)
+let esubst_t (x : var) (t' : ty) (e : exp) : exp =
+  if StringSet.equal (tfree_vars t') StringSet.empty
+  then esubst_t_i x t' e
+  else raise NOT_CLOSED_ERROR
+
+(**********************************
+ * Small step transition relation *
+ **********************************)
+
+(* Converting natval to exp *)
+let rec exp_of_natval (nv0 : natval) : exp = match nv0 with
+  | VZero -> Zero
+  | VSucc(nv) -> Succ(exp_of_natval nv)
+
+(* Converting val to exp *)
+let rec exp_of_val (v0 : value) : exp = match v0 with
+  | VTrue -> True
+  | VFalse -> False
+  | VNat(nv) -> exp_of_natval nv
+  | VPair(v1,v2) -> Pair(exp_of_val v1,exp_of_val v2)
+  | VLambda(x,t,e) -> Lambda(x,t,e)
+
+(* A result is either a value, an expression, or the symbol `stuck`.
+ *
+ * r ∈ result ⩴ v | e | stuck
+ *)
+type result =
+  | Val of value
+  | Step of exp
+  | Stuck
+[@@deriving show {with_path = false}]
+
+
+(* The small-step relation e —→ e
+ *
+ * Assumption: e is closed.
+ *
+ * If step(e) = v, then e is a value (and does not take a step).
+ * (i.e., e ∈ val)
+ *
+ * If step(e) = e′, then e steps to e′.
+ * (i.e., e —→ e′)
+ *
+ * If step(e) = stuck, then e is stuck, that is e is not a value and does not
+ * take a step.
+ * (i.e., e ∉ val and e —↛)
+ *)
+let rec step (e0 : exp) : result = match e0 with
+  (* true ∈ val *)
+  | True -> Val(VTrue)
+  (* false ∈ val *)
+  | False -> Val(VFalse)
+  | If(e1,e2,e3) -> begin match step e1 with
+      (* [If-True]
+       * if(true){e₂}{e₃} —→ e₂ *)
+      | Val(VTrue) -> Step(e2)
+      (* [If-False]
+       * if(false){e₂}{e₃} —→ e₃ *)
+      | Val(VFalse) -> Step(e3)
+      (* v ∉ {true,false}
+       * ⟹
+       * if(v){e₂}{e₃} ∉ val
+       * if(v){e₂}{e₃} —↛ *)
+      | Val(_) -> Stuck
+      (* [If-Cong]
+       * e₁ —→ e₁′
+       * ⟹
+       * if(e₁){e₂}{e₃} —→ if(e₁′){e₂}{e₃} *)
+      | Step(e1') -> Step(If(e1',e2,e3))
+      (* e₁ ∉ val
+       * e₁ —↛
+       * ⟹
+       * if(e₁){e₂}{e₃} ∉ val
+       * if(e₁){e₂}{e₃} —↛ *)
+      | Stuck -> Stuck
+      end
+  (* zero ∈ val *)
+  | Zero -> Val(VNat(VZero))
+  | Succ(e) -> begin match step e with
+      (* nv ∈ nval
+       * ⟹
+       * succ(nv) ∈ nval ⊆ val *)
+      | Val(VNat(nv)) -> Val(VNat(VSucc(nv)))
+      (* v ∉ nval
+       * ⟹
+       * succ(v) ∉ val
+       * succ(v) —↛ *)
+      | Val(_) -> Stuck
+      (* [Succ-Cong]
+       * e —→ e′
+       * succ(e) —→ succ(e′) *)
+      | Step(e') -> Step(Succ(e'))
+      (* e ∉ val
+       * e —↛
+       * ⟹
+       * succ(e) ∉ val
+       * succ(e) —↛ *)
+      | Stuck -> Stuck
+      end
+  | Pred(e) -> begin match step e with
+      (* [Pred-Zero]
+       * pred(zero) —→ zero *)
+      | Val(VNat(VZero)) -> Step(Zero)
+      (* [Pred-Succ]
+       * pred(succ(nv)) —→ nv *)
+      | Val(VNat(VSucc(nv))) -> Step(exp_of_natval nv)
+      (* v ∉ nval
+       * ⟹
+       * pred(v) ∉ val
+       * pred(v) —↛ *)
+      | Val(_) -> Stuck
+      (* [Pred-Cong]
+       * e —→ e′
+       * ⟹
+       * pred(e) —→ pred(e′) *)
+      | Step(e') -> Step(Pred(e'))
+      (* e ∉ val
+       * e —↛
+       * ⟹
+       * pred(e) ∉ val
+       * pred(e) —↛ *)
+      | Stuck -> Stuck
+      end
+  | IsZero(e) -> begin match step e with
+      (* [IsZero-Zero]
+       * iszero(zero) —→ true *)
+      | Val(VNat(VZero)) -> Step(True)
+      (* [IsZero-Succ]
+       * iszero(succ(nv)) —→ false *)
+      | Val(VNat(VSucc(nv))) -> Step(False)
+      (* v ∉ nval
+       * ⟹
+       * iszero(v) ∉ val
+       * iszero(v) —↛ *)
+      | Val(_) -> Stuck
+      (* [IsZero-Cong]
+       * e —→ e′
+       * ⟹
+       * iszero(e) —→ iszero(e′) *)
+      | Step(e') -> Step(IsZero(e'))
+      (* e ∉ val
+       * e —↛
+       * ⟹
+       * iszero(e) ∉ val
+       * iszero(e) —↛ *)
+      | Stuck -> Stuck
+      end
+  | Pair(e1,e2) -> begin match step e1 with
+      | Val(v1) -> begin match step e2 with
+          (* ⟨v₁,v₂⟩ ∈ val *)
+          | Val(v2) -> Val(VPair(v1,v2))
+          (* [Pair-Cong-2]
+           * e —→ e′
+           * ⟹
+           * ⟨v,e⟩ —→ ⟨v,e′⟩ *)
+          | Step(e2') -> Step(Pair(e1,e2'))
+          (* e ∉ val
+           * e —↛
+           * ⟹
+           * ⟨v,e⟩ ∉ val
+           * ⟨v,e⟩ —↛ *)
+          | Stuck -> Stuck
+          end
+      (* [Pair-Cong-1]
+       * e₁ —→ e₁′
+       * ⟹
+       * ⟨e₁,e₂⟩ —→ ⟨e₁′,e₂⟩ *)
+      | Step(e1') -> Step(Pair(e1',e2))
+      (* e₁ ∉ val
+       * e₁ —↛
+       * ⟹
+       * ⟨e₁,e₂⟩ ∉ val
+       * ⟨e₁,e₂⟩ —↛ *)
+      | Stuck -> Stuck
+      end
+  | Projl(e1) -> begin match step e1 with
+      (* [Projl-Pair]
+       * projl(⟨v₁,v₂⟩) —→ v₁ *)
+      | Val(VPair(v1,v2)) -> Step(exp_of_val v1)
+      (* ∄v₁,v₂. v = ⟨v₁,v₂⟩
+       * ⟹
+       * projl(v) ∉ val
+       * projl(v) —↛ *)
+      | Val(_) -> Stuck
+      (* [Projl-Cong]
+       * e —→ e′
+       * ⟹
+       * projl(e) —→ projl(e′) *)
+      | Step(e1') -> Step(Projl(e1'))
+      (* e ∉ val
+       * e —↛
+       * ⟹
+       * projl(e) ∉ val
+       * projl(e) —↛ *)
+      | Stuck -> Stuck
+      end
+  | Projr(e1) -> begin match step e1 with
+      (* [Projr-Pair]
+       * projr(⟨v₁,v₂⟩) —→ v₂ *)
+      | Val(VPair(v1,v2)) -> Step(exp_of_val v2)
+      (* ∄v₁,v₂. v = ⟨v₁,v₂⟩
+       * ⟹
+       * projr(v) ∉ val
+       * projr(v) —↛ *)
+      | Val(_) -> Stuck
+      (* [Projr-Cong]
+       * e —→ e′
+       * ⟹
+       * projr(e) —→ projr(e′) *)
+      | Step(e1') -> Step(Projr(e1'))
+      (* e ∉ val
+       * e —↛
+       * ⟹
+       * projr(e) ∉ val
+       * projr(e) —↛ *)
+      | Stuck -> Stuck
+      end
+  (* x is not closed *)
+  | Var(x) -> raise NOT_CLOSED_ERROR
+  | Let(x,e1,e2) -> begin match step e1 with
+      (* [Let-Val]
+       * let x ≔ v in e —→ [x↦v]e *)
+      | Val(v1) -> Step(esubst_e x (exp_of_val v1) e2)
+      (* [Let-Cong]
+       * e₁ —→ e₁′
+       * ⟹
+       * let x ≔ e₁ in e₂ —→ let x = e₁′ in e₂ *)
+      | Step(e1') -> Step(Let(x,e1',e2))
+      (* e₁ ∉ val
+       * e₁ —↛
+       * ⟹
+       * let x ≔ e₁ in e₂ ∉ val
+       * let x ≔ e₁ in e₂ —↛ *)
+      | Stuck -> Stuck
+      end
+  (* λ(x:τ).e ∈ val *)
+  | Lambda(x,t,e) -> Val(VLambda(x,t,e))
+  | Apply(e1,e2) -> begin match step e1 with
+      | Val(v1) -> begin match step e2 with
+          | Val(v2) -> begin match v1 with
+              (* [Apply-Lambda (β)]
+               * (λ(x:τ).e)v —→ [x↦v]e *)
+              | VLambda(x,t,e) -> Step(esubst_e x (exp_of_val v2) e)
+              (* ∄x,τ,e. v₁ = λ(x:τ).e
+               * ⟹
+               * v₁(v₂) ∉ val
+               * v₁(v₂) —↛ *)
+              | _ -> Stuck
+              end
+          (* [E-App-Raise-2]
+           * v₁(raise v₂₁) —→ raise v₂₁*)
+          | Raise(v21) -> Step(Raise(exp_of_val v21))
+          (* [Apply-Cong-2]
+           * e —→ e′
+           * ⟹
+           * v(e) —→ v(e′) *)
+          | Step(e2') -> Step(Apply(e1,e2'))
+          (* e ∉ val
+           * e —↛
+           * ⟹
+           * v(e) ∉ val
+           * v(e) —↛ *)
+          | Stuck -> Stuck
+          end
+      (* [E-App-Raise-1]
+       * (raise v₁₁)e₂ —→ raise v₁₁*)
+      | Raise(v11) -> Step(Raise(exp_of_val v11))
+      (* [Apply-Cong-1]
+       * e₁ —→ e₁′
+       * ⟹
+       * e₁(e₂) —→ e₁′(e₂) *)
+      | Step(e1') -> Step(Apply(e1',e2))
+      (* e₁ ∉ val
+       * e₁ —↛
+       * ⟹
+       * e₁(e₂) ∉ val
+       * e₁(e₂) –↛ *)
+      | Stuck -> Stuck
+      end
+  | Raise(e1) -> begin match step e1 with
+      (* [E-RaiseRaise]
+       * raise(raise v₁₁) —→ raise v₁₁ *)
+      | Raise(v11) -> Step(Raise(exp_of_val v11))
+      (* [E-Raise]
+       * e₁ —→ e₁′
+       * ⟹
+       * raise e₁ —→ raise e₁′ *)
+      | Step(e1') -> Step(Raise(e1'))
+      (* e₁ ∉ val
+       * e₁ —↛
+       * ⟹
+       * raise e₁ ∉ val
+       * raise e₁ –↛ *)
+      | Stuck -> Stuck
+      end
+  | Try(e1,e2) -> begin match step e1 with
+      (* [E-TryV]
+       * try v₁ with t₂ —→ v₁ *)
+      | Val(v1) -> Step(exp_of_val v1)
+      (* [E-TryRaise]
+       * try raise v₁₁ with t₂ —→ t₂ v₁₁ *)
+      | Raise(v11) -> Step(Apply(e2,exp_of_val v11))
+      (* [E-Try]
+       * e₁ —→ e₁′
+       * ⟹
+       * try e₁ with e₂ —→ try e₁′ with e₂ *)
+      | Step(e1') -> Step(Try(e1',e2))
+      (* e₁ ∉ val
+       * e₁ —↛
+       * ⟹
+       * try e₁ with e₂ ∉ val
+       * try e₁ with e₂ –↛ *)
+      | Stuck -> Stuck
+
+(* The reflexive transitive closure of the small-step relation e —→* e *)
+let rec step_star (e : exp) : exp = match step e with
+  | Val(v) -> exp_of_val v
+  | Step(e') -> step_star e'
+  | Stuck -> e
+
+(***********************
+ * Well-typed relation *
+ ***********************)
+
+(* An auxiliary function for testing the equality of two types, modulo alpha
+ * conversion.
+ *
+ * First, a helper function tequal_r which keeps track of which bindings are
+ * equal by assigning them to unique numbers.
+ *)
+let rec tequal_r (l : int) (t1e : int string_map) (t2e : int string_map) (t1 : ty) (t2 : ty) : bool = match t1 , t2 with
+  | Bool , Bool -> true
+  | Nat , Nat -> true
+  | Fun(t11,t12) , Fun(t21,t22) -> tequal_r l t1e t2e t11 t21 && tequal_r l t1e t2e t12 t22
+  | Prod(t11,t12) , Prod(t21,t22) -> tequal_r l t1e t2e t11 t21 && tequal_r l t1e t2e t12 t22
+  | _ , _ -> false
+
+(* tequal τ₁ τ₂ = true ⟺  τ₁ ≈ᵅ τ₂
+ *
+ * !! use tequal in your implementation of infer anytime you need to compare
+ * two types for equality
+ *)
+let tequal (t1 : ty) (t2 : ty) : bool = tequal_r 1 StringMap.empty StringMap.empty t1 t2
+
+exception TYPE_ERROR
+
+(* The relation:
+ *   Γ ⊢ e : τ
+ * infer Γ e = τ ⟺  Γ ⊢ : τ
+ *)
+let rec infer (g : tenv) (e0 : exp) : ty = match e0 with
+  (* [True]
+   * Γ ⊢ true : bool *)
+  | True -> Bool
+  (* [False]
+   * Γ ⊢ false : bool *)
+  | False -> Bool
+  (* [If]
+   * Γ ⊢ e₁ : bool
+   * Γ ⊢ e₂ : τ
+   * Γ ⊢ e₃ : τ
+   * ⟹
+   * Γ ⊢ if(e₁){e₂}{e₃} : τ *)
+  | If(e1,e2,e3) ->
+      let t1 = infer g e1 in
+      let t2 = infer g e2 in
+      let t3 = infer g e3 in
+      if not (t1 = Bool) then raise TYPE_ERROR else
+      if not (t2 = t3) then raise TYPE_ERROR else
+      t2
+  (* [Zero]
+   * Γ ⊢ zero : nat *)
+  | Zero -> Nat
+  (* [Succ]
+   * Γ ⊢ e : nat
+   * ⟹
+   * Γ ⊢ succ(e) : nat *)
+  | Succ(e) ->
+      let t = infer g e in
+      if not (t = Nat) then raise TYPE_ERROR else
+      Nat
+  (* [Pred]
+   * Γ ⊢ e : nat
+   * ⟹
+   * Γ ⊢ pred(e) : nat *)
+  | Pred(e) ->
+      let t = infer g e in
+      if not (t = Nat) then raise TYPE_ERROR else
+      Nat
+  (* [IsZero]
+   * Γ ⊢ e : nat
+   * ⟹
+   * Γ ⊢ iszero(e) : bool *)
+  | IsZero(e) ->
+      let t = infer g e in
+      if not (t = Nat) then raise TYPE_ERROR else
+      Bool
+  (* [Pair]
+   * Γ ⊢ e₁ : τ₁
+   * Γ ⊢ e₂ : τ₂
+   * ⟹
+   * Γ ⊢ ⟨e₁,e₂⟩ : τ₁ × τ₂ *)
+  | Pair(e1,e2) ->
+      let t1 = infer g e1 in
+      let t2 = infer g e2 in
+      Prod(t1,t2)
+  (* [Projl]
+   * Γ ⊢ e : τ₁ × τ₂
+   * ⟹
+   * Γ ⊢ projl(e) : τ₁ *)
+  | Projl(e) ->
+      let t = infer g e in
+      begin match t with
+      | Prod(t1,_) -> t1
+      | _ -> raise TYPE_ERROR
+      end
+  (* [Projr]
+   * Γ ⊢ e : τ₁ × τ₂
+   * ⟹
+   * Γ ⊢ projr(e) : τ₂ *)
+  | Projr(e) ->
+      let t = infer g e in
+      begin match t with
+      | Prod(_,t2) -> t2
+      | _ -> raise TYPE_ERROR
+      end
+  (* [Var]
+   * Γ(x) = τ
+   * ⟹
+   * Γ ⊢ x : τ *)
+  | Var(x) -> StringMap.find x g
+  (* [Var]
+   * Γ ⊢ e₁ : τ₁
+   * Γ[x↦τ₁] ⊢ e₂ : τ₂
+   * ⟹
+   * Γ ⊢ let x ≔ e₁ in e₂ : τ₂ *)
+  | Let(x,e1,e2) ->
+      let t = infer g e1 in
+      infer (StringMap.add x t g) e2
+  (* [Lambda]
+   * Γ[x↦τ₁] ⊢ e : τ₂
+   * ⟹
+   * Γ ⊢ λ(x:τ₁).e : τ₁ → τ₂ *)
+  | Lambda(x,t1,e) ->
+      let t2 = infer (StringMap.add x t1 g) e in
+      Fun(t1,t2)
+  (* [Apply]
+   * Γ ⊢ e₁ : τ₁ → τ₂
+   * Γ ⊢ e₂ : τ₁
+   * ⟹
+   * Γ ⊢ e₁(e₂) : τ₂ *)
+  | Apply(e1,e2) ->
+      let t1 = infer g e1 in
+      let t2 = infer g e2 in
+      begin match t1 with
+      | Fun(t11,t12) ->
+          if not (t11 = t2) then raise TYPE_ERROR else
+          t12
+      | _ -> raise TYPE_ERROR
+      end
+  (* [Raise] ------ NEED TO FIX THIS ONE
+   * Γ ⊢ e₁ : τexn
+   * ⟹
+   * Γ ⊢ raise e₁ : τ₂ *)
+  | Raise(e) ->
+      let t1 = infer g e in
+      begin match t1 with
+        | exn -> t2
+        | _ -> raise TYPE_ERROR
+      end
+  (* [Try]
+   * Γ ⊢ e₁ : τ₁
+   * Γ ⊢ e₂ : τexn → τ₁
+   * ⟹
+   * Γ ⊢ try e₁ with e₂ : τ₁ *)
+  | Try(e1,e2) ->
+      let t1 = infer g e1 in
+      let t2 = infer g e2 in
+      begin match t2 with
+        | Fun(t11,t12) ->
+          if not (t11 = exn) then raise TYPE_ERROR else
+          if not (t12 = t1) then raise TYPE_ERROR else
+            t1
+        | _ -> raise TYPE_ERROR
+      end
+
+(***********
+ * Testing *
+ ***********)
+
+(**************************************************
+ * Medium Sized Program of Real World Application *
+ **************************************************)
+
+
+(* Name: Kristin Mills *)
