@@ -1,11 +1,19 @@
 UVM CS225 Final Project: Exceptions
 
+This project will implement a small-step semantics and type checker for simply 
+typed lambda calculus extended with exceptions and exception handling in the 
+programming language, oCaml.
+
+-------------------------------------------------------------------------------
+
 In order to run the code for this project:
 
 Make sure you have ocaml 4.06.0, and ppx_deriving installed.
 
     > opam switch 4.06.0
     > opam install ppx_deriving
+    
+-------------------------------------------------------------------------------
 
 There are two special files in this directory which help merlin and ocamlbuild
 know how to build the project.
@@ -17,6 +25,8 @@ First, there is a hidden file .merlin which instructs merlin to:
 
 Next, there is a special file _tags which instructs ocamlbuild to:
 1. use the ppx_deriving.std package when compiling files
+
+-------------------------------------------------------------------------------
 
 There is an included Makefile that will build all *.ml files in the current
 directory as the default target:
